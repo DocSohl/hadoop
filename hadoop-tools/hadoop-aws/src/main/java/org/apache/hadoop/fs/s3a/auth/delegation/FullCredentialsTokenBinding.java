@@ -22,6 +22,8 @@ import java.io.IOException;
 import java.net.URI;
 import java.util.Optional;
 
+import com.google.common.base.Preconditions;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.s3a.AWSCredentialProviderList;
 import org.apache.hadoop.fs.s3a.S3AUtils;
@@ -72,7 +74,6 @@ public class FullCredentialsTokenBinding extends
   @Override
   protected void serviceStart() throws Exception {
     super.serviceStart();
-    loadAWSCredentials();
   }
 
   /**
@@ -115,6 +116,7 @@ public class FullCredentialsTokenBinding extends
   @Override
   public AWSCredentialProviderList deployUnbonded() throws IOException {
     requireServiceStarted();
+    loadAWSCredentials();
     return new AWSCredentialProviderList(
         "Full Credentials Token Binding",
         new MarshalledCredentialProvider(
@@ -140,7 +142,8 @@ public class FullCredentialsTokenBinding extends
       final Optional<RoleModel.Policy> policy,
       final EncryptionSecrets encryptionSecrets) throws IOException {
     requireServiceStarted();
-
+    Preconditions.checkNotNull(
+        awsCredentials, "No AWS credentials to use for a delegation token");
     return new FullCredentialsTokenIdentifier(getCanonicalUri(),
         getOwnerText(),
         awsCredentials,
