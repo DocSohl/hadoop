@@ -947,4 +947,15 @@ public final class Constants {
    * Value: {@value} seconds.
    */
   public static final int THREAD_POOL_SHUTDOWN_DELAY_SECONDS = 30;
+
+  public static final String DIRECTORY_MARKER_POLICY =
+      "fs.s3a.directory.markers";
+
+  public static final String DIRECTORY_MARKER_POLICY_KEEP =
+      "keep";
+  public static final String DIRECTORY_MARKER_POLICY_DELETE =
+      "delete";
+  public static final String DIRECTORY_MARKER_POLICY_AUTHORITATIVE =
+      "authoritative";
+
 }

@@ -104,6 +104,7 @@ import org.apache.hadoop.fs.s3a.impl.ChangeDetectionPolicy;
 import org.apache.hadoop.fs.s3a.impl.ContextAccessors;
 import org.apache.hadoop.fs.s3a.impl.CopyOutcome;
 import org.apache.hadoop.fs.s3a.impl.DeleteOperation;
+import org.apache.hadoop.fs.s3a.impl.DirectoryMarkerRetention;
 import org.apache.hadoop.fs.s3a.impl.InternalConstants;
 import org.apache.hadoop.fs.s3a.impl.MultiObjectDeleteSupport;
 import org.apache.hadoop.fs.s3a.impl.OperationCallbacks;
@@ -288,6 +289,8 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
   private final S3AFileSystem.OperationCallbacksImpl
       operationCallbacks = new OperationCallbacksImpl();
 
+  private DirectoryMarkerRetention directoryMarkerRetention;
+
   /** Add any deprecated keys. */
   @SuppressWarnings("deprecation")
   private static void addDeprecatedKeys() {
@@ -445,6 +448,12 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
             DEFAULT_S3GUARD_DISABLED_WARN_LEVEL);
         S3Guard.logS3GuardDisabled(LOG, warnLevel, bucket);
       }
+      // directory retention policy, which will look at authoritative paths
+      // if needed
+      directoryMarkerRetention = new DirectoryMarkerRetention(
+          conf.getTrimmed(DIRECTORY_MARKER_POLICY,
+              DIRECTORY_MARKER_POLICY_KEEP),
+          this::allowAuthoritative);
 
       initMultipartUploads(conf);
 
@@ -1545,7 +1554,9 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
       Path destParent = destCreated.getParent();
       if (!sourceRenamed.getParent().equals(destParent)) {
         LOG.debug("source & dest parents are different; fix up dir markers");
-        deleteUnnecessaryFakeDirectories(destParent);
+        if (!keepDirectoryMarkers(destCreated)) {
+          deleteUnnecessaryFakeDirectories(destParent);
+        }
         maybeCreateFakeParentDirectory(sourceRenamed);
       }
     }
@@ -2925,60 +2936,27 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
       final String key,
       final Set<StatusProbeEnum> probes,
       @Nullable Set<Path> tombstones) throws IOException {
-    if (!key.isEmpty()) {
-      if (probes.contains(StatusProbeEnum.Head) && !key.endsWith("/")) {
-        try {
-          // look for the simple file
-          ObjectMetadata meta = getObjectMetadata(key);
-          LOG.debug("Found exact file: normal file {}", key);
-          return new S3AFileStatus(meta.getContentLength(),
-              dateToLong(meta.getLastModified()),
-              path,
-              getDefaultBlockSize(path),
-              username,
-              meta.getETag(),
-              meta.getVersionId());
-        } catch (AmazonServiceException e) {
-          // if the response is a 404 error, it just means that there is
-          // no file at that path...the remaining checks will be needed.
-          if (e.getStatusCode() != SC_404 || isUnknownBucket(e)) {
-            throw translateException("getFileStatus", path, e);
-          }
-        } catch (AmazonClientException e) {
+    if (!key.isEmpty() && !key.endsWith("/")
+        && probes.contains(StatusProbeEnum.Head)) {
+      try {
+        // look for the simple file
+        ObjectMetadata meta = getObjectMetadata(key);
+        LOG.debug("Found exact file: normal file {}", key);
+        return new S3AFileStatus(meta.getContentLength(),
+            dateToLong(meta.getLastModified()),
+            path,
+            getDefaultBlockSize(path),
+            username,
+            meta.getETag(),
+            meta.getVersionId());
+      } catch (AmazonServiceException e) {
+        // if the response is a 404 error, it just means that there is
+        // no file at that path...the remaining checks will be needed.
+        if (e.getStatusCode() != SC_404 || isUnknownBucket(e)) {
           throw translateException("getFileStatus", path, e);
         }
-      }
-
-      // Either a normal file was not found or the probe was skipped.
-      // because the key ended in "/" or it was not in the set of probes.
-      // Look for the dir marker
-      if (probes.contains(StatusProbeEnum.DirMarker)) {
-        String newKey = maybeAddTrailingSlash(key);
-        try {
-          ObjectMetadata meta = getObjectMetadata(newKey);
-
-          if (objectRepresentsDirectory(newKey, meta.getContentLength())) {
-            LOG.debug("Found file (with /): fake directory");
-            return new S3AFileStatus(Tristate.TRUE, path, username);
-          } else {
-            LOG.warn("Found file (with /): real file? should not happen: {}",
-                key);
-
-            return new S3AFileStatus(meta.getContentLength(),
-                    dateToLong(meta.getLastModified()),
-                    path,
-                    getDefaultBlockSize(path),
-                    username,
-                    meta.getETag(),
-                    meta.getVersionId());
-          }
-        } catch (AmazonServiceException e) {
-          if (e.getStatusCode() != SC_404 || isUnknownBucket(e)) {
-            throw translateException("getFileStatus", newKey, e);
-          }
-        } catch (AmazonClientException e) {
-          throw translateException("getFileStatus", newKey, e);
-        }
+      } catch (AmazonClientException e) {
+        throw translateException("getFileStatus", path, e);
       }
     }
 
@@ -3020,6 +2998,38 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
       }
     }
 
+    // Either a normal file was not found or the probe was skipped.
+    // because the key ended in "/" or it was not in the set of probes.
+    // Look for the dir marker
+    if (!key.isEmpty() && probes.contains(StatusProbeEnum.DirMarker)) {
+      String newKey = maybeAddTrailingSlash(key);
+      try {
+        ObjectMetadata meta = getObjectMetadata(newKey);
+
+        if (objectRepresentsDirectory(newKey, meta.getContentLength())) {
+          LOG.debug("Found file (with /): fake directory");
+          // this used to self-declare as empty; now it is "don't know"
+          return new S3AFileStatus(Tristate.UNKNOWN, path, username);
+        } else {
+          LOG.warn("Found file (with /): real file? should not happen: {}",
+              key);
+
+          return new S3AFileStatus(meta.getContentLength(),
+              dateToLong(meta.getLastModified()),
+              path,
+              getDefaultBlockSize(path),
+              username,
+              meta.getETag(),
+              meta.getVersionId());
+        }
+      } catch (AmazonServiceException e) {
+        if (e.getStatusCode() != SC_404 || isUnknownBucket(e)) {
+          throw translateException("getFileStatus", newKey, e);
+        }
+      } catch (AmazonClientException e) {
+        throw translateException("getFileStatus", newKey, e);
+      }
+    }
     LOG.debug("Not Found: {}", path);
     throw new FileNotFoundException("No such file or directory: " + path);
   }
@@ -3611,12 +3621,17 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
     Preconditions.checkArgument(length >= 0, "content length is negative");
     final boolean isDir = objectRepresentsDirectory(key, length);
     // kick off an async delete
-    final CompletableFuture<?> deletion = submit(
-        unboundedThreadPool,
-        () -> {
-          deleteUnnecessaryFakeDirectories(p.getParent());
-          return null;
-        });
+    CompletableFuture<?> deletion;
+    if (!keepDirectoryMarkers(p)) {
+      deletion = submit(
+          unboundedThreadPool,
+          () -> {
+            deleteUnnecessaryFakeDirectories(p.getParent());
+            return null;
+          });
+    } else {
+      deletion = null;
+    }
     // this is only set if there is a metastore to update and the
     // operationState parameter passed in was null.
     BulkOperationState stateToClose = null;
@@ -3673,6 +3688,17 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
       // if a new operation state was created, close it.
       IOUtils.cleanupWithLogger(LOG, stateToClose);
     }
+  }
+
+  /**
+   * Should we keep directory markers under the path being created
+   * by mkdir/file creation/rename?
+   * @param path path to probe
+   * @return true if the markers MAY be retained,
+   * false if they MUST be deleted
+   */
+  private boolean keepDirectoryMarkers(Path path) {
+    return directoryMarkerRetention.test(path);
   }
 
   /**
