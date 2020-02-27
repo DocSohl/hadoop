@@ -30,7 +30,7 @@ import static org.apache.hadoop.fs.s3a.Constants.DIRECTORY_MARKER_POLICY_DELETE;
 import static org.apache.hadoop.fs.s3a.Constants.DIRECTORY_MARKER_POLICY_KEEP;
 
 /**
- * Implementation for directory marker policy.
+ * Implementation of directory marker policy.
  */
 public class DirectoryMarkerRetention implements Predicate<Path> {
 

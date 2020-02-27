@@ -452,7 +452,7 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
       // if needed
       directoryMarkerRetention = new DirectoryMarkerRetention(
           conf.getTrimmed(DIRECTORY_MARKER_POLICY,
-              DIRECTORY_MARKER_POLICY_KEEP),
+              DIRECTORY_MARKER_POLICY_DELETE),
           this::allowAuthoritative);
 
       initMultipartUploads(conf);
@@ -2961,7 +2961,8 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
     }
 
     // execute the list
-    if (probes.contains(StatusProbeEnum.List)) {
+    boolean executeList = probes.contains(StatusProbeEnum.List);
+    if (executeList) {
       try {
         String dirKey = maybeAddTrailingSlash(key);
         S3ListRequest request = createListObjectsRequest(dirKey, "/", 1);
@@ -3008,8 +3009,14 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
 
         if (objectRepresentsDirectory(newKey, meta.getContentLength())) {
           LOG.debug("Found file (with /): fake directory");
-          // this used to self-declare as empty; now it is "don't know"
-          return new S3AFileStatus(Tristate.UNKNOWN, path, username);
+          // this used to self-declare as empty; now it decides
+          // based on whether a list was also executed in the current
+          // series of probes
+          return new S3AFileStatus(
+              executeList
+                  ? Tristate.TRUE
+                  : Tristate.UNKNOWN,
+              path, username);
         } else {
           LOG.warn("Found file (with /): real file? should not happen: {}",
               key);
